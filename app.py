@@ -53,7 +53,7 @@ st.markdown("""
 
 
 
-def run_backtest(data, strategy_name, params, trade_mode, initial_cash):
+def run_backtest(data, strategy_name, params, trade_mode, initial_cash, indicator_engine):
     """Run the backtest with the specified parameters."""
     try:
         strategy_adapter = registry.get(strategy_name)
@@ -77,10 +77,12 @@ def run_backtest(data, strategy_name, params, trade_mode, initial_cash):
             exclusive_orders=True,
         )
 
+        # Build run kwargs for strategy params
         run_kwargs = dict(
             fast_ema=int(params["fast_ema"]),
             slow_ema=int(params["slow_ema"]),
             trade_mode=trade_mode,
+            indicator_engine=indicator_engine,   # pass engine to Strategy
         )
 
         results = bt.run(**run_kwargs)
@@ -131,6 +133,15 @@ def main():
                 help="Starting equity for the backtest"
             )
             
+            # Indicator Engine selection
+            st.subheader("⚙️ Indicator Engine")
+            indicator_engine = st.selectbox(
+                "Indicator Engine",
+                options=["pandas", "TA-Lib"],
+                index=0,
+                help="Use pandas (portable) or TA-Lib (fast, requires native library) for EMA"
+            )
+            
             # Trade mode selection
             st.subheader("💼 Trade Mode")
             trade_mode = create_trade_mode_selector()
@@ -142,6 +153,7 @@ def main():
             params = {}
             trade_mode = None
             initial_cash = 100000
+            indicator_engine = "pandas"
             run_button = False
     
     # Main content area
@@ -182,7 +194,7 @@ def main():
                         backtest_data = prepare_data_for_backtest(data)
                         
                         # Run the backtest
-                        results, bt = run_backtest(backtest_data, selected_strategy, params, trade_mode, initial_cash)
+                        results, bt = run_backtest(backtest_data, selected_strategy, params, trade_mode, initial_cash, indicator_engine)
                         
                         # Display results
                         st.markdown("---")
@@ -194,7 +206,25 @@ def main():
                         # Trades table with explicit DataFrame checks to avoid truthiness ambiguity
                         trades = getattr(results, "_trades", None)
                         if isinstance(trades, pd.DataFrame) and not trades.empty:
-                            display_trades_table(trades.copy())
+                            trades = trades.copy()
+
+                            # Add EntryType based on Size (verified on sample CSV: Size>0 → Long, Size<0 → Short)
+                            if "Size" in trades.columns:
+                                trades["EntryType"] = np.where(trades["Size"] > 0, "Long", "Short")
+                            else:
+                                trades["EntryType"] = "Long"  # fallback; should not happen if Size exists
+
+                            # Optional: reorder columns to surface EntryType early
+                            preferred_order = [
+                                "EntryTime", "ExitTime", "EntryType", "Size",
+                                "EntryPrice", "ExitPrice", "PnL", "ReturnPct", "Commission",
+                                "Duration", "SL", "TP", "Tag"
+                            ]
+                            rest = [c for c in trades.columns if c not in preferred_order]
+                            trades = trades[[c for c in preferred_order if c in trades.columns] + rest]
+
+                            # Show table and provide download
+                            display_trades_table(trades)
                             
                             # Add Download Trades CSV button right below the table
                             csv_bytes = trades.to_csv(index=False).encode("utf-8")
@@ -215,6 +245,14 @@ def main():
                             display_equity_curve(equity_df)
                         
                         show_success_message("Backtest completed successfully!")
+                        
+                        # If user selected TA-Lib but it's not installed, show a one-time warning after the run
+                        # (Strategy falls back automatically; we surface UX feedback here.)
+                        if indicator_engine == "TA-Lib":
+                            try:
+                                import talib  # noqa
+                            except Exception:
+                                st.warning("TA-Lib not found in this environment. Fell back to pandas EMA.", icon="⚠️")
                         
                 except Exception as e:
                     show_error_message(str(e))

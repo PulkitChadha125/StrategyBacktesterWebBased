@@ -1,5 +1,6 @@
-from typing import Type
+from typing import Type, Optional
 import pandas as pd
+import numpy as np
 from backtesting import Strategy
 from backtesting.lib import crossover
 from core.strategy_base import StrategyAdapter
@@ -14,27 +15,38 @@ class EMACrossoverAdapter(StrategyAdapter):
     def get_bt_strategy_class(self) -> Type[Strategy]:
         return EMACrossBT
 
+def _ema_pandas(data, period: int):
+    # Works for backtesting DataSeries (with .s) or raw arrays/Series
+    s = data.s if hasattr(data, "s") else pd.Series(data)
+    return s.ewm(span=int(period), adjust=False).mean().to_numpy()
+
+def _ema_talib_or_pandas(data, period: int):
+    # Try TA-Lib; if unavailable, fallback to pandas vectorized EMA
+    try:
+        import talib  # noqa
+        s = data.s if hasattr(data, "s") else pd.Series(data)
+        out = talib.EMA(s.values.astype(float), timeperiod=int(period))
+        return out
+    except Exception:
+        # Fallback
+        return _ema_pandas(data, period)
+
 class EMACrossBT(Strategy):
-    # Strategy parameters (set via bt.run(**params))
+    # Parameters populated by bt.run(**params)
     fast_ema: int = 12
     slow_ema: int = 26
-    trade_mode: str = "Both_Buy_Sell"  # Only_Buy | Only_Sell | Both_Buy_Sell
+    trade_mode: str = "Both_Buy_Sell"    # Only_Buy | Only_Sell | Both_Buy_Sell
+    indicator_engine: str = "pandas"     # "pandas" or "TA-Lib"
 
     def init(self):
         close = self.data.Close
-        # Use pandas ewm for EMA calculation - integrates with backtesting.py's indicator pipeline
-        # Convert backtesting._Array to pandas Series for ewm calculation
-        def ema(data, period):
-            # Convert to pandas Series if needed and calculate EMA
-            # Use modern .s accessor instead of deprecated .to_series()
-            if hasattr(data, 's'):
-                data_series = data.s
-            else:
-                data_series = pd.Series(data)
-            return data_series.ewm(span=period).mean()
-        
-        self.fast = self.I(ema, close, self.fast_ema)
-        self.slow = self.I(ema, close, self.slow_ema)
+        engine = (self.indicator_engine or "pandas").lower()
+        if engine.startswith("ta"):
+            self.fast = self.I(_ema_talib_or_pandas, close, self.fast_ema)
+            self.slow = self.I(_ema_talib_or_pandas, close, self.slow_ema)
+        else:
+            self.fast = self.I(_ema_pandas, close, self.fast_ema)
+            self.slow = self.I(_ema_pandas, close, self.slow_ema)
 
     def next(self):
         up = crossover(self.fast, self.slow)      # fast crosses ABOVE slow

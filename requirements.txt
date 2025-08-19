@@ -2,3 +2,4 @@ backtesting==0.3.3
 pandas>=2.0.0
 numpy>=1.24.0
 streamlit>=1.36.0
+TA-Lib>=0.4.0
